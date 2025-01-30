@@ -169,7 +169,7 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
-    implementation(name: 'nexgo-smartpos-sdk', ext: 'aar') // Use 'name' instead of 'files()'
+    implementation(name: 'nexgo-smartpos-sdk-v3.08.002_20240410', ext: 'aar')
 
     def isGifEnabled = (findProperty('expo.gif.enabled') ?: "") == "true";
     def isWebpEnabled = (findProperty('expo.webp.enabled') ?: "") == "true";
