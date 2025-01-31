@@ -21,15 +21,20 @@ import com.nexgo.oaf.apiv3.device.reader.CardSlotTypeEnum
 import com.nexgo.oaf.apiv3.device.reader.OnCardInfoListener
 import com.nexgo.oaf.apiv3.device.reader.TypeAInfoEntity
 import com.nexgo.oaf.apiv3.device.reader.TypeBInfoEntity
+import com.nexgo.oaf.apiv3.device.reader.RfCardTypeEnum 
 
 import com.nexgo.oaf.apiv3.card.ultralight.UltralightEV1CardHandler
 import com.nexgo.oaf.apiv3.card.ultralight.UltralightCCardHandler
 import com.nexgo.oaf.apiv3.card.mifare.M1CardHandler
 
+import android.nfc.Tag
+import android.nfc.tech.IsoDep
+
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.text.DecimalFormat
+import java.io.IOException
 
 class NexgoModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext),
   OnPrintListener {
@@ -183,150 +188,234 @@ class NexgoModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
       null
     }
   }
-
   @ReactMethod
-  fun readNFC(promise: Promise) {
+  @RequiresApi(Build.VERSION_CODES.KITKAT)
+  fun readUltralightCard(promise: Promise) {
     try {
-      Log.d(TAG, "Iniciando readNFC()")
-  
-      // Inicializa el lector de tarjetas
-      Log.d(TAG, "Obteniendo instancia de CardReader")
-      val cardReader: CardReader? = deviceEngine?.cardReader
-  
-      if (cardReader == null) {
-        Log.e(TAG, "CardReader es NULL")
-        promise.reject("NFC_ERROR", "El lector de tarjetas NFC no pudo inicializarse")
-        return
-      } else {
-        Log.d(TAG, "CardReader inicializado correctamente")
-      }
-  
-      // Busca tarjetas NFC
-      Log.d(TAG, "Buscando tarjetas NFC")
-      val slotTypes = hashSetOf(CardSlotTypeEnum.RF)
-      val timeout = 60 // Tiempo de espera en segundos
-      val result = cardReader.searchCard(slotTypes, timeout, object : OnCardInfoListener {
-        override fun onCardInfo(retCode: Int, cardInfo: CardInfoEntity?) {
-            Log.d(TAG, "onCardInfo() llamado con retCode: $retCode")
-            if (retCode == SdkResult.Success && cardInfo != null) {
-                Log.d(TAG, "Tarjeta NFC detectada: ${cardInfo.cardNo}")
-            } else {
-                Log.e(TAG, "Error al leer la tarjeta NFC: $retCode")
-            }
-        }
-    
-        override fun onSwipeIncorrect() {
-            Log.e(TAG, "Deslizamiento incorrecto de tarjeta")
-        }
-    
-        override fun onMultipleCards() {
-            Log.e(TAG, "Se detectaron múltiples tarjetas, por favor intente de nuevo.")
-        }
-    })
-    
-  
-      if (result != SdkResult.Success) {
-        Log.e(TAG, "Error al iniciar la búsqueda de tarjetas NFC: ${result}")
-        promise.reject("NFC_ERROR", "Error al iniciar la búsqueda de tarjetas NFC: ${result}")
-      } else {
-        Log.d(TAG, "Búsqueda de tarjetas NFC iniciada correctamente")
-      }
-    } catch (e: Exception) {
-      Log.e(TAG, "Error en readNFC(): ${e.message}")
-      promise.reject("NFC_ERROR", e)
-    }
-  }
-
-  @ReactMethod
-  fun readMifareClassicCard(promise: Promise) {
-    try {
+        Log.d(TAG, "Iniciando readUltralightCard()")
         val deviceEngine = APIProxy.getDeviceEngine(reactApplicationContext)
+            ?: throw Exception("DeviceEngine initialization failed")
+        Log.d(TAG, "DeviceEngine inicializado correctamente")
+
         val cardReader = deviceEngine.cardReader
+            ?: throw Exception("CardReader initialization failed")
+        Log.d(TAG, "CardReader inicializado correctamente")
 
         cardReader.searchCard(hashSetOf(CardSlotTypeEnum.RF), 30, object : OnCardInfoListener {
+            @RequiresApi(Build.VERSION_CODES.KITKAT)
             override fun onCardInfo(retCode: Int, cardInfo: CardInfoEntity?) {
+                Log.d(TAG, "onCardInfo() llamado con retCode: $retCode")
                 if (retCode == SdkResult.Success && cardInfo != null) {
-                    val mifareClassicHandler = deviceEngine.M1CardHandler
-                    val uid = mifareClassicHandler.getUID(cardInfo)
-                    val sectors = mifareClassicHandler.readSectors(cardInfo, 0, 15) // Read sectors 0 to 15
+                    try {
+                        Log.d(TAG, "Tarjeta detectada: ${cardInfo.cardNo}")
+                        val cardData = Arguments.createMap().apply {
+                            putString("cardNo", cardInfo.cardNo ?: "N/A")
+                            putBoolean("isICC", cardInfo.isICC)
+                            putString("rfCardType", cardInfo.rfCardType?.name ?: "N/A")
+                            
+                            // Agregar información específica de Type A o B
+                            when (cardInfo) {
+                                is TypeAInfoEntity -> {
+                                    putString("cardType", "TypeA")
+                                    putString("atqa", bytesToHex(cardInfo.atqa))
+                                    putString("sak", cardInfo.sak.toString())
+                                    putString("uid", bytesToHex(cardInfo.uid))
+                                    putString("ats", bytesToHex(cardInfo.ats))
+                                }
+                                is TypeBInfoEntity -> {
+                                    putString("cardType", "TypeB")
+                                    putString("atqb", bytesToHex(cardInfo.atqb))
+                                    putString("attrResp", bytesToHex(cardInfo.attrResp))
+                                }
+                            }
+                        }
 
-                    val cardData = Arguments.createMap().apply {
-                        putString("uid", uid)
-                        putString("sectors", sectors.joinToString("\n"))
+                        if (cardInfo.rfCardType == RfCardTypeEnum.ULTRALIGHT) {
+                            Log.d(TAG, "Tarjeta Ultralight detectada")
+                            
+                            val nexgoBlocksData = readBlocksWithNexgoAPI(cardInfo)
+                            cardData.putMap("nexgo_blocks", nexgoBlocksData)
+
+                            val isoDep = getIsoDep(cardInfo)
+                            isoDep?.let { isoDepInstance ->
+                                try {
+                                    isoDepInstance.connect()
+                                    Log.d(TAG, "Conexión ISO-DEP establecida")
+                                    val blocksData = readUltralightBlocks(isoDepInstance, 4, 15)
+                                    cardData.putMap("isodep_blocks", blocksData)
+                                } finally {
+                                    isoDepInstance.close()
+                                    Log.d(TAG, "Conexión ISO-DEP cerrada")
+                                }
+                            }
+                        }
+
+                        promise.resolve(cardData)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error leyendo bloques: ${e.message}")
+                        promise.reject("ULTRALIGHT_ERROR", "Error reading blocks: ${e.message}")
                     }
-
-                    Log.d(TAG, "Mifare Classic card data: $cardData")
-                    promise.resolve(cardData)
                 } else {
-                    promise.reject("MIFARE_CLASSIC_ERROR", "Card read failed: $retCode")
+                    Log.e(TAG, "Fallo en la lectura de la tarjeta: $retCode")
+                    promise.reject("ULTRALIGHT_ERROR", "Card read failed: $retCode")
                 }
             }
 
             override fun onSwipeIncorrect() {
-                promise.reject("MIFARE_CLASSIC_ERROR", "Incorrect card swipe")
+                Log.e(TAG, "Deslizamiento incorrecto de la tarjeta")
+                promise.reject("ULTRALIGHT_ERROR", "Incorrect card swipe")
             }
 
             override fun onMultipleCards() {
-                promise.reject("MIFARE_CLASSIC_ERROR", "Multiple cards detected")
+                Log.e(TAG, "Múltiples tarjetas detectadas")
+                promise.reject("ULTRALIGHT_ERROR", "Multiple cards detected")
             }
         })
     } catch (e: Exception) {
-        promise.reject("MIFARE_CLASSIC_ERROR", e)
+        Log.e(TAG, "Error en readUltralightCard(): ${e.message}")
+        promise.reject("ULTRALIGHT_ERROR", e)
     }
   }
 
-  @ReactMethod
-  fun readUltralightCard(promise: Promise) {
+  @RequiresApi(Build.VERSION_CODES.KITKAT)
+  private fun getIsoDep(cardInfo: CardInfoEntity): IsoDep? {
       try {
-          val deviceEngine = APIProxy.getDeviceEngine(reactApplicationContext)
-              ?: throw Exception("DeviceEngine initialization failed")
-  
-          val cardReader = deviceEngine.cardReader
-              ?: throw Exception("CardReader initialization failed")
-  
-          cardReader.searchCard(hashSetOf(CardSlotTypeEnum.RF), 30, object : OnCardInfoListener {
-              override fun onCardInfo(retCode: Int, cardInfo: CardInfoEntity?) {
-                  if (retCode == SdkResult.Success && cardInfo != null) {
-                      val cardData = Arguments.createMap().apply {
-                          // Basic card information
-                          putString("cardNo", cardInfo.cardNo ?: "N/A")
-                          putString("expiredDate", cardInfo.expiredDate ?: "N/A")
-                          putString("serviceCode", cardInfo.serviceCode ?: "N/A")
-                          putBoolean("isICC", cardInfo.isICC)
-  
-                          // RF Card specific details
-                          putString("rfCardType", cardInfo.rfCardType?.name ?: "N/A")
-                          putString("cardSlotType", cardInfo.cardExistslot?.name ?: "N/A")
-  
-  
-                          // Additional details if it's a TypeA card
-                          if (cardInfo is TypeAInfoEntity) {
-                              putString("uid", cardInfo.uid?.joinToString("") { byte -> "%02X".format(byte) } ?: "N/A")
-                              putString("atqa", cardInfo.atqa?.joinToString("") { byte -> "%02X".format(byte) } ?: "N/A")
-                              putString("sak", cardInfo.sak.toString())
-                              putString("ats", cardInfo.ats?.joinToString("") { byte -> "%02X".format(byte) } ?: "N/A")
+          Log.d(TAG, "Intentando obtener interfaz ISO-DEP")
+          
+          when (cardInfo) {
+              is TypeAInfoEntity -> {
+                  Log.d(TAG, "Procesando tarjeta Type A")
+                  logTypeAFields()
+                  
+                  val possibleTagFields = listOf("mTag", "tag", "nfcTag", "cardTag", "aTag")
+                  for (fieldName in possibleTagFields) {
+                      try {
+                          val tagField = TypeAInfoEntity::class.java.getDeclaredField(fieldName)
+                          tagField.isAccessible = true
+                          val tag = tagField.get(cardInfo) as Tag?
+                          
+                          if (tag != null) {
+                              Log.d(TAG, "Campo Type A encontrado: $fieldName - Tag: ${tag.id.toHexString()}")
+                              return IsoDep.get(tag)
                           }
+                      } catch (e: Exception) {
+                          Log.d(TAG, "Error en campo $fieldName Type A: ${e.message}")
                       }
-  
-                      Log.d(TAG, "Detailed card data: $cardData")
-                      promise.resolve(cardData)
-                  } else {
-                      promise.reject("ULTRALIGHT_ERROR", "Card read failed: $retCode")
                   }
               }
-  
-              override fun onSwipeIncorrect() {
-                  promise.reject("ULTRALIGHT_ERROR", "Incorrect card swipe")
+              
+              is TypeBInfoEntity -> {
+                  Log.d(TAG, "Procesando tarjeta Type B")
+                  logTypeBFields()
+                  
+                  val possibleTagFields = listOf("mTag", "tag", "nfcTag", "cardTag", "bTag")
+                  for (fieldName in possibleTagFields) {
+                      try {
+                          val tagField = TypeBInfoEntity::class.java.getDeclaredField(fieldName)
+                          tagField.isAccessible = true
+                          val tag = tagField.get(cardInfo) as Tag?
+                          
+                          if (tag != null) {
+                              Log.d(TAG, "Campo Type B encontrado: $fieldName - Tag: ${tag.id.toHexString()}")
+                              return IsoDep.get(tag)
+                          }
+                      } catch (e: Exception) {
+                          Log.d(TAG, "Error en campo $fieldName Type B: ${e.message}")
+                      }
+                  }
               }
-  
-              override fun onMultipleCards() {
-                  promise.reject("ULTRALIGHT_ERROR", "Multiple cards detected")
+              
+              else -> {
+                  Log.e(TAG, "Tipo de tarjeta no reconocido: ${cardInfo.javaClass.simpleName}")
               }
-          })
+          }
+          
+          return null
       } catch (e: Exception) {
-          promise.reject("ULTRALIGHT_ERROR", e)
+          Log.e(TAG, "Error crítico al obtener tag: ${e.javaClass.simpleName} - ${e.message}")
+          return null
       }
   }
+  
+  // Función auxiliar para loguear campos de TypeB
+  @RequiresApi(Build.VERSION_CODES.KITKAT)
+  private fun logTypeBFields() {
+      try {
+          val fields = TypeBInfoEntity::class.java.declaredFields
+          Log.d(TAG, "=== Campos de TypeBInfoEntity ===")
+          fields.forEach { field ->
+              field.isAccessible = true
+              Log.d(TAG, "Nombre: ${field.name} - Tipo: ${field.type.simpleName}")
+          }
+      } catch (e: Exception) {
+          Log.e(TAG, "Error al listar campos Type B: ${e.message}")
+      }
+  }
+
+  @RequiresApi(Build.VERSION_CODES.KITKAT)
+  private fun logTypeAFields() {
+    try {
+      val fields = TypeAInfoEntity::class.java.declaredFields
+      Log.d(TAG, "=== Campos de TypeAInfoEntity ===")
+      fields.forEach { field ->
+        field.isAccessible = true
+        Log.d(TAG, "Nombre: ${field.name} - Tipo: ${field.type.simpleName}")
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Error al listar campos: ${e.message}")
+    }
+  }
+
+  private fun readBlocksWithNexgoAPI(cardInfo: CardInfoEntity): WritableMap {
+    val blocksMap = Arguments.createMap()
+    try {
+        // Get ultralight handler directly from device engine
+        val ultralightHandler = deviceEngine?.ultralightCCardHandler
+            ?: throw Exception("Ultralight Handler not available")
+
+        // Read blocks
+        for (block in 4..15) {
+            val blockData = ultralightHandler.readBlock(block.toByte())
+            if (blockData != null) {
+                blocksMap.putString("block_$block", bytesToHex(blockData))
+            } else {
+                Log.e(TAG, "Error reading block $block: null response")
+            }
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "Error in Nexgo API: ${e.message}")
+    }
+    return blocksMap
+}
+
+  private fun readUltralightBlocks(isoDep: IsoDep, startBlock: Int, endBlock: Int): WritableMap {
+    Log.d(TAG, "Leyendo bloques Ultralight desde $startBlock hasta $endBlock")
+    val blocksMap = Arguments.createMap()
+    try {
+      for (block in startBlock..endBlock) {
+        val command = byteArrayOf(
+          0x30.toByte(), // READ Command para Ultralight
+          block.toByte() // Número de bloque
+        )
+
+        val response = isoDep.transceive(command)
+        val hexResponse = bytesToHex(response)
+        Log.d(TAG, "Bloque $block leído: $hexResponse")
+        blocksMap.putString("block_$block", hexResponse)
+      }
+    } catch (e: IOException) {
+      Log.e(TAG, "Error leyendo bloque: ${e.message}")
+      throw Exception("Error reading block: ${e.message}")
+    }
+    return blocksMap
+  }
+
+  private fun bytesToHex(bytes: ByteArray): String {
+    return bytes.joinToString("") { "%02X".format(it) }
+  }
+
+  fun ByteArray.toHexString(): String = joinToString("") { "%02X".format(it) }
+
 
   override fun onPrintResult(resultCode: Int) {
     when (resultCode) {
