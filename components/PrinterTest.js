@@ -50,7 +50,17 @@ const PrinterTest = () => {
     try {
       setNfcData(null);
       setError(null);
-      const data = await NexgoModule.readNFC();
+      const data = await NexgoModule.readMifareClassicCard();
+      setNfcData(data);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+  const readNFCUltraligt = async () => {
+    try {
+      setNfcData(null);
+      setError(null);
+      const data = await NexgoModule.readUltralightCard();
       setNfcData(data);
     } catch (e) {
       setError(e.message);
@@ -72,6 +82,15 @@ const PrinterTest = () => {
         </TouchableOpacity>
 
         <Button title="Leer NFC" onPress={readNFC} style={{marginTop: 20}}/>
+      {nfcData && (
+        <View>
+          <Text>Número de tarjeta: {nfcData.cardNo}</Text>
+          {/* Mostrar otros datos de la tarjeta */}
+        </View>
+      )}
+
+      {error && <Text style={{ color: 'red' }}>Error: {error}</Text>}
+        <Button title="Leer NFC ultralight" onPress={readNFCUltraligt} style={{marginTop: 20}}/>
       {nfcData && (
         <View>
           <Text>Número de tarjeta: {nfcData.cardNo}</Text>

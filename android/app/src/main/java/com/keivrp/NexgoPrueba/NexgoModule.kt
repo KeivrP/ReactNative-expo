@@ -19,6 +19,13 @@ import com.nexgo.oaf.apiv3.device.reader.CardInfoEntity
 import com.nexgo.oaf.apiv3.device.reader.CardReader
 import com.nexgo.oaf.apiv3.device.reader.CardSlotTypeEnum
 import com.nexgo.oaf.apiv3.device.reader.OnCardInfoListener
+import com.nexgo.oaf.apiv3.device.reader.TypeAInfoEntity
+import com.nexgo.oaf.apiv3.device.reader.TypeBInfoEntity
+
+import com.nexgo.oaf.apiv3.card.ultralight.UltralightEV1CardHandler
+import com.nexgo.oaf.apiv3.card.ultralight.UltralightCCardHandler
+import com.nexgo.oaf.apiv3.card.mifare.M1CardHandler
+
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -228,6 +235,97 @@ class NexgoModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaM
       Log.e(TAG, "Error en readNFC(): ${e.message}")
       promise.reject("NFC_ERROR", e)
     }
+  }
+
+  @ReactMethod
+  fun readMifareClassicCard(promise: Promise) {
+    try {
+        val deviceEngine = APIProxy.getDeviceEngine(reactApplicationContext)
+        val cardReader = deviceEngine.cardReader
+
+        cardReader.searchCard(hashSetOf(CardSlotTypeEnum.RF), 30, object : OnCardInfoListener {
+            override fun onCardInfo(retCode: Int, cardInfo: CardInfoEntity?) {
+                if (retCode == SdkResult.Success && cardInfo != null) {
+                    val mifareClassicHandler = deviceEngine.M1CardHandler
+                    val uid = mifareClassicHandler.getUID(cardInfo)
+                    val sectors = mifareClassicHandler.readSectors(cardInfo, 0, 15) // Read sectors 0 to 15
+
+                    val cardData = Arguments.createMap().apply {
+                        putString("uid", uid)
+                        putString("sectors", sectors.joinToString("\n"))
+                    }
+
+                    Log.d(TAG, "Mifare Classic card data: $cardData")
+                    promise.resolve(cardData)
+                } else {
+                    promise.reject("MIFARE_CLASSIC_ERROR", "Card read failed: $retCode")
+                }
+            }
+
+            override fun onSwipeIncorrect() {
+                promise.reject("MIFARE_CLASSIC_ERROR", "Incorrect card swipe")
+            }
+
+            override fun onMultipleCards() {
+                promise.reject("MIFARE_CLASSIC_ERROR", "Multiple cards detected")
+            }
+        })
+    } catch (e: Exception) {
+        promise.reject("MIFARE_CLASSIC_ERROR", e)
+    }
+  }
+
+  @ReactMethod
+  fun readUltralightCard(promise: Promise) {
+      try {
+          val deviceEngine = APIProxy.getDeviceEngine(reactApplicationContext)
+              ?: throw Exception("DeviceEngine initialization failed")
+  
+          val cardReader = deviceEngine.cardReader
+              ?: throw Exception("CardReader initialization failed")
+  
+          cardReader.searchCard(hashSetOf(CardSlotTypeEnum.RF), 30, object : OnCardInfoListener {
+              override fun onCardInfo(retCode: Int, cardInfo: CardInfoEntity?) {
+                  if (retCode == SdkResult.Success && cardInfo != null) {
+                      val cardData = Arguments.createMap().apply {
+                          // Basic card information
+                          putString("cardNo", cardInfo.cardNo ?: "N/A")
+                          putString("expiredDate", cardInfo.expiredDate ?: "N/A")
+                          putString("serviceCode", cardInfo.serviceCode ?: "N/A")
+                          putBoolean("isICC", cardInfo.isICC)
+  
+                          // RF Card specific details
+                          putString("rfCardType", cardInfo.rfCardType?.name ?: "N/A")
+                          putString("cardSlotType", cardInfo.cardExistslot?.name ?: "N/A")
+  
+  
+                          // Additional details if it's a TypeA card
+                          if (cardInfo is TypeAInfoEntity) {
+                              putString("uid", cardInfo.uid?.joinToString("") { byte -> "%02X".format(byte) } ?: "N/A")
+                              putString("atqa", cardInfo.atqa?.joinToString("") { byte -> "%02X".format(byte) } ?: "N/A")
+                              putString("sak", cardInfo.sak.toString())
+                              putString("ats", cardInfo.ats?.joinToString("") { byte -> "%02X".format(byte) } ?: "N/A")
+                          }
+                      }
+  
+                      Log.d(TAG, "Detailed card data: $cardData")
+                      promise.resolve(cardData)
+                  } else {
+                      promise.reject("ULTRALIGHT_ERROR", "Card read failed: $retCode")
+                  }
+              }
+  
+              override fun onSwipeIncorrect() {
+                  promise.reject("ULTRALIGHT_ERROR", "Incorrect card swipe")
+              }
+  
+              override fun onMultipleCards() {
+                  promise.reject("ULTRALIGHT_ERROR", "Multiple cards detected")
+              }
+          })
+      } catch (e: Exception) {
+          promise.reject("ULTRALIGHT_ERROR", e)
+      }
   }
 
   override fun onPrintResult(resultCode: Int) {
